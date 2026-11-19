@@ -1,0 +1,39 @@
+#!/bin/sh
+# Install and run inside the user's Muse Secure VM.
+set -eu
+umask 077
+base=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+python="$base/.venv/bin/python"
+
+case "${1:-}" in
+    setup)
+        if [ "$#" -gt 2 ]; then
+            echo "使い方: sh muse-discord setup [Discordのチャンネルリンク]" >&2
+            exit 2
+        fi
+        if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))'; then
+            echo "Python 3.10 以降が必要です。" >&2
+            exit 1
+        fi
+        if [ ! -x "$python" ]; then
+            python3 -m venv "$base/.venv"
+        fi
+        (unset DISCORD_AUTHORIZATION_REF DISCORD_BOT_TOKEN; "$python" -m pip --disable-pip-version-check install --no-cache-dir --only-binary=:all: --index-url https://pypi.org/simple -r "$base/requirements.txt")
+        shift
+        exec "$python" "$base/muse.py" configure "$@"
+        ;;
+    serve|tools|check|read|add|list)
+        if [ ! -x "$python" ]; then
+            echo "先に sh muse-discord setup を実行してください。" >&2
+            exit 1
+        fi
+        if [ "$1" = "serve" ]; then
+            exec "$python" "$base/server.py"
+        fi
+        exec "$python" "$base/muse.py" "$@"
+        ;;
+    *)
+        echo "使い方: sh muse-discord {setup [チャンネルリンク]|tools|add LINK [--alias NAME]|list|check|read [--limit 件数] [--before ID または --after ID]|serve}" >&2
+        exit 2
+        ;;
+esac
