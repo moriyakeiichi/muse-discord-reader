@@ -56,6 +56,9 @@ async def invoke(args, process):
             result = await client.call_tool("list_discord_channels", {})
         elif args.command == "add":
             result = await client.call_tool("add_discord_channel", {"link": args.url, "alias": args.alias})
+        elif args.command in ("default", "remove"):
+            name = "set_default_discord_channel" if args.command == "default" else "remove_discord_channel"
+            result = await client.call_tool(name, {"channel": args.channel})
         else:
             arguments = {"limit": 5 if args.command == "check" else args.limit}
             for field in ("before", "after", "channel"):
@@ -76,13 +79,17 @@ async def invoke(args, process):
 def main():
     parser = argparse.ArgumentParser(description="Muse用・Discordチャンネル読み取りMCP")
     commands = parser.add_subparsers(dest="command", required=True)
-    configure = commands.add_parser("configure", help="対象チャンネルのリンクを保存")
+    configure = commands.add_parser("configure", help="リンクで登録。省略時は一覧")
     configure.add_argument("url", nargs="?", help="省略時は保存済みのチャンネルを確認")
     commands.add_parser("tools", help="MCP接続と公開ツールを確認")
     add = commands.add_parser("add", help="リンクでチャンネルを追加")
     add.add_argument("url")
     add.add_argument("--alias")
     commands.add_parser("list", help="登録済み一覧")
+    default = commands.add_parser("default", help="既定の登録チャンネルを選ぶ")
+    default.add_argument("channel", help="登録名または一覧のチャンネルID")
+    remove = commands.add_parser("remove", help="このVMの一覧から登録を解除")
+    remove.add_argument("channel", help="登録名または一覧のチャンネルID")
     check = commands.add_parser("check", help="最新5件で本文が読めるかを確認。本文自体は表示しません")
     read = commands.add_parser("read", help="指定チャンネルの履歴を取得")
     check.add_argument("--channel")

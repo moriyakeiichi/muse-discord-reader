@@ -5,14 +5,33 @@ umask 077
 base=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 python="$base/.venv/bin/python"
 
+usage() {
+    cat <<'USAGE'
+使い方: sh muse-discord コマンド [引数]
+  setup [チャンネルリンク]          インストール・更新
+  tools | list                      MCPツール・登録チャンネルの一覧
+  add LINK [--alias NAME]           登録・呼び名の更新
+  check [--channel NAME]            本文を表示せず接続確認
+  read [--channel NAME] [--limit 件数] [--before ID | --after ID]
+  default NAME                      省略時に読むチャンネルを選択
+  remove NAME                       このVMの一覧から登録を解除
+  configure [チャンネルリンク]      登録（引数省略時は一覧）
+  serve                             stdio MCPサーバーを起動
+USAGE
+}
+
 case "${1:-}" in
     setup)
         if [ "$#" -gt 2 ]; then
             echo "使い方: sh muse-discord setup [Discordのチャンネルリンク]" >&2
             exit 2
         fi
-        if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))'; then
-            echo "Python 3.10 以降が必要です。" >&2
+        interpreter=python3
+        if [ -x "$python" ]; then
+            interpreter=$python
+        fi
+        if ! "$interpreter" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+            echo "Python 3.11 以降が必要です。古い .venv がある場合は退避してから setup を再実行してください。" >&2
             exit 1
         fi
         if [ ! -x "$python" ]; then
@@ -22,7 +41,7 @@ case "${1:-}" in
         shift
         exec "$python" "$base/muse.py" configure "$@"
         ;;
-    serve|tools|check|read|add|list)
+    serve|tools|check|read|add|list|remove|default|configure)
         if [ ! -x "$python" ]; then
             echo "先に sh muse-discord setup を実行してください。" >&2
             exit 1
@@ -32,8 +51,11 @@ case "${1:-}" in
         fi
         exec "$python" "$base/muse.py" "$@"
         ;;
+    help|-h|--help)
+        usage
+        ;;
     *)
-        echo "使い方: sh muse-discord {setup [チャンネルリンク]|tools|add LINK [--alias NAME]|list|check|read [--limit 件数] [--before ID または --after ID]|serve}" >&2
+        usage >&2
         exit 2
         ;;
 esac

@@ -1,4 +1,4 @@
-"""Read one configured Discord guild channel using the v10 REST API."""
+"""Read registered Discord guild channels using the v10 REST API."""
 
 import asyncio
 import math
@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 CONFIG_FILE = Path(__file__).resolve().with_name("channel.url")
 API = "https://discord.com/api/v10"
+VERSION = "2.1.0"
+PROJECT_URL = "https://github.com/moriyakeiichi/muse-discord-reader"
 ID_PATTERN = r"^[1-9][0-9]{0,19}$"
 MAX_ID = (1 << 64) - 1
 MESSAGE_CHANNEL_TYPES = {0, 2, 5, 10, 11, 12, 13}
@@ -157,7 +159,7 @@ async def get_discord(client, path, params=None):
             raise ReadError(f"Discordの回数制限です（429）。{when}再試行してください。")
         errors = {
             401: "認証に失敗しました（401）。専用BotのトークンとMuseの認証情報の割り当てを確認してください。",
-            403: "閲覧が拒否されました（403）。Botの参加、チャンネルの表示・履歴権限、非公開スレッドなら参加状態を確認してください。",
+            403: "閲覧が拒否されました（403）。Botの参加と表示・履歴権限を確認してください。ボイス・ステージでは「接続」、非公開スレッドでは参加も必要です。",
             404: "チャンネルが見つからないか、Botから見えません（404）。対象リンクとチャンネル権限を確認してください。",
         }
         if response.status_code != 200:
@@ -168,45 +170,92 @@ async def get_discord(client, path, params=None):
             raise ReadError("Discordの応答がJSONではありません。接続先とVMの通信許可を確認してください。") from None
 
 
+def object_list(value):
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError("expected a list of objects")
+    return value
+
+
+def text_field(item, key):
+    value = item.get(key) if isinstance(item, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def named_items(value, key):
+    names = [text_field(item, key) for item in object_list(value)]
+    if any(name is None for name in names):
+        raise ValueError("missing or invalid name")
+    return names
+
+
 def component_texts(components):
-    for item in components:
+    for item in object_list(components):
         if item.get("type") == 10 and isinstance(item.get("content"), str):
             yield item["content"]
-        yield from component_texts(item.get("components", []))
+        if "components" in item:
+            yield from component_texts(item["components"])
+
+
+def project_embed(embed):
+    result = {key: embed[key] for key in ("title", "description") if text_field(embed, key) is not None}
+    if "fields" in embed:
+        fields = []
+        for item in object_list(embed["fields"]):
+            name, value = text_field(item, "name"), text_field(item, "value")
+            if name is None or value is None:
+                raise ValueError("missing embed field text")
+            field = {"name": name, "value": value}
+            if isinstance(item.get("inline"), bool):
+                field["inline"] = item["inline"]
+            fields.append(field)
+        result["fields"] = fields
+    return result
+
+
+def project_detail(field, value):
+    if field == "attachments":
+        return named_items(value, "filename")
+    if field == "sticker_items":
+        return named_items(value, "name")
+    if field == "embeds":
+        return [project_embed(embed) for embed in object_list(value)]
+    if field == "components":
+        return list(component_texts(value))
+    if not isinstance(value, dict):  # poll
+        raise ValueError("expected a poll object")
+    return {
+        "question": text_field(value.get("question"), "text"),
+        "answers": [text_field(item.get("poll_media"), "text") for item in object_list(value.get("answers", []))],
+    }
 
 
 def project_message(row, target):
     if (not isinstance(row, dict) or row.get("channel_id") != target.channel
             or row.get("guild_id", target.guild) != target.guild or not valid_id(row.get("id"))):
         raise ReadError("設定したチャンネルと照合できないメッセージを受け取ったため、取得を中止しました。")
-    author = row.get("author") or {}
+    author = row.get("author")
     message = {
         "id": row["id"],
-        "author": (row.get("member") or {}).get("nick") or author.get("global_name") or author.get("username"),
-        "timestamp": row.get("timestamp"),
-        "content": row.get("content", ""),
+        "author": text_field(row.get("member"), "nick") or text_field(author, "global_name") or text_field(author, "username"),
+        "timestamp": text_field(row, "timestamp"),
+        "content": text_field(row, "content") or "",
         "link": f"{target.link}/{row['id']}",
     }
-    if row.get("edited_timestamp"):
+    if text_field(row, "edited_timestamp"):
         message["edited_timestamp"] = row["edited_timestamp"]
-    if row.get("attachments"):
-        message["attachments"] = [item["filename"] for item in row["attachments"]]
-    if row.get("embeds"):
-        message["embeds"] = [
-            {key: embed[key] for key in ("title", "description", "fields") if key in embed}
-            for embed in row["embeds"]
-        ]
-    texts = list(component_texts(row.get("components", [])))
-    if texts:
-        message["component_texts"] = texts
-    if row.get("sticker_items"):
-        message["stickers"] = [item["name"] for item in row["sticker_items"]]
-    if row.get("poll"):
-        poll = row["poll"]
-        message["poll"] = {
-            "question": poll.get("question", {}).get("text"),
-            "answers": [item.get("poll_media", {}).get("text") for item in poll.get("answers", [])],
-        }
+    omitted = []
+    for field, output in (("attachments", "attachments"), ("embeds", "embeds"),
+                          ("components", "component_texts"), ("sticker_items", "stickers"), ("poll", "poll")):
+        if row.get(field):
+            try:
+                detail = project_detail(field, row[field])
+            except ValueError:
+                omitted.append(field)
+            else:
+                if detail:
+                    message[output] = detail
+    if omitted:
+        message["note"] = "Discordの応答形式を確認できず、一部を省略しました（" + ", ".join(omitted) + "）。"
     return message
 
 
@@ -215,7 +264,7 @@ async def read_page(client, target, request):
     channel = await get_discord(client, path)
     if not isinstance(channel, dict) or channel.get("id") != target.channel or channel.get("guild_id") != target.guild:
         raise ReadError("DiscordのサーバーIDまたはチャンネルIDが設定と一致しません。対象リンクを確認してください。")
-    if channel.get("type") not in MESSAGE_CHANNEL_TYPES:
+    if type(channel.get("type")) is not int or channel["type"] not in MESSAGE_CHANNEL_TYPES:
         raise ReadError("このチャンネル種別に直接の履歴はありません。フォーラム・メディアでは対象の投稿を開き、そのリンクを設定してください。")
 
     rows = await get_discord(client, f"{path}/messages", request.model_dump(exclude_none=True, exclude={"channel"}))
@@ -224,7 +273,7 @@ async def read_page(client, target, request):
     messages = [project_message(row, target) for row in rows]
     messages.sort(key=lambda message: int(message["id"]), reverse=True)
     page = {
-        "channel": {"id": target.channel, "name": channel.get("name"), "link": target.link},
+        "channel": {"id": target.channel, "name": text_field(channel, "name"), "link": target.link},
         "count": len(messages),
         "messages": messages,
         "next_page": None,
@@ -246,7 +295,7 @@ async def read_page(client, target, request):
 def discord_client():
     headers = {
         "Authorization": authorization_header(),
-        "User-Agent": "DiscordBot (https://discord.com/developers/applications, 1.0) MuseChannelReader/1.0",
+        "User-Agent": f"DiscordBot ({PROJECT_URL}, {VERSION})",
     }
     return httpx.AsyncClient(headers=headers, transport=DiscordCurlTransport(), follow_redirects=False)
 
@@ -258,7 +307,7 @@ async def register_channel(link, alias=None):
     async with discord_client() as client:
         page = await read_page(client, target, PageRequest(limit=1))
         guild = await get_discord(client, f"/guilds/{target.guild}")
-    if not isinstance(guild, dict) or guild.get("id") != target.guild or not guild.get("name") or not page["channel"]["name"]:
+    if not isinstance(guild, dict) or guild.get("id") != target.guild or not text_field(guild, "name") or not page["channel"]["name"]:
         raise ReadError("サーバー名またはチャンネル名を確認できませんでした。")
     registry.save(target, page["channel"]["name"], guild["name"], alias.strip() if alias else None)
     result = {"registered": target.link, "guild": guild["name"], "name": page["channel"]["name"]}
